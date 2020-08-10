@@ -3912,37 +3912,90 @@ def TextSub16(src: vs.VideoNode, file: str, mod: bool = False, tv_range: bool = 
     return core.std.MaskedMerge(src16, sub16, submask, planes=[0, 1, 2])
 
 
-def TMinBlur(clip: vs.VideoNode, r: int = 1, thr: float = 2) -> vs.VideoNode:
+def TMinBlur(clip: vs.VideoNode, r: int = 1, thr: float = 2, mod: int = 1, planes: PlanesType = None) -> vs.VideoNode:
     """Thresholded MinBlur
-
     Use another MinBlur with larger radius to guide the smoothing effect of current MinBlur.
-
     For detailed motivation and description (in Chinese), see:
     https://gist.github.com/WolframRhodium/1e3ae9276d70aa1ddc93ea833cdce9c6#file-05-minblurmod-md
-
     Args:
         clip: Input clip.
-
         r: (int) Radius of MinBlur() filter.
             Default is 1.
-
         thr: (float) Threshold in 8 bits scale.
             If it is larger than 255, the output will be identical to original MinBlur().
             Default is 2.
-
+        mod: (int) number of MinBlur iterations to be used. 
+            0 is identical to original MinBlur, 1 is MinBlurMod1(), etc
+            Default is 1.
+        planes: (int []) Specify which planes to process.
+            Unprocessed planes will be copied from "clip".
+            By default, all planes will be processed.
     """
 
     funcName = 'TMinBlur'
 
-    if not isinstance(clip, vs.VideoNode) or clip.format.sample_type != vs.INTEGER:
-        raise TypeError(funcName + ': \"clip\" must be an integer clip!')
+    f = clip.format
 
-    thr = scale(thr, clip.format.bits_per_sample)
+    if not isinstance(clip, vs.VideoNode):
+        raise TypeError(funcName + ': \"clip\" must be a clip!')
 
-    pre1 = haf.MinBlur(clip, r=r)
-    pre2 = haf.MinBlur(clip, r=r+1)
+    if planes is None:
+        planes = list(range(f.num_planes))
+    elif isinstance(planes, int):
+        planes = [planes]
 
-    return core.std.Expr([clip, pre1, pre2], ['y z - abs {thr} <= y x ?'.format(thr=thr)])
+    r = [r + x for x in range(mod+1)] or [r]
+
+    thr = thr / 255 if f.sample_type else scale(thr, f.bits_per_sample)
+
+    gauss = clip.std.Convolution([1,2,1,2,4,2,1,2,1], planes=planes)
+
+    blur = []
+    if 0 in r: 
+        diffa = clip.std.MakeDiff(gauss, planes=planes)
+        diffb = diffa.std.Convolution(coordinates=[1,2,1,2,4,2,1,2,1], planes=planes)
+
+        neutral = f' {1 << (f.bits_per_sample - 1)} - ' if f.sample_type == vs.INTEGER else ''
+        sbr = f'x 0 y {neutral} y z - min max y {neutral} y z - max min -'
+        expr = [sbr if x in planes else '' for x in range(f.num_planes)]
+
+        blur += [core.std.Expr([clip, diffa, diffb], expr)]
+    if 1 in r:
+        blur += [gauss]
+    for x in range(2, max(r) + 1):
+        blur += [blur[-1].std.Convolution([1]*9)]
+
+    med = []
+    clip_int = clip
+    if f.sample_type:
+        clip_int = mvf.Depth(clip, 16, 0, dither=1)
+    for x in r:
+        if x == 1 and 0 in r:
+            med *= 2
+        elif x < 2:
+            med += [clip.std.Median(planes)]
+        else:
+            ctmf = clip_int.ctmf.CTMF(x, planes=planes)
+            if f.sample_type:
+                clips = [clip, mvf.Depth(ctmf, f.bits_per_sample, 1), clip_int, ctmf]
+                expr = ['z a = x y ?' if p in planes else '' for p in range(f.num_planes)]
+                ctmf = core.std.Expr(clips, expr)
+            med += [ctmf]
+    
+    minblur = [core.std.Interleave([clip, x, y]).tmedian.TemporalMedian(1, planes)[1::3] for x, y in zip(blur, med)]
+
+    if mod == 0:
+        return minblur[0]
+    elif mod == 1:
+        return core.std.Expr([clip] + minblur, f'y z - abs {thr} <= y x ?')
+    else:
+        from string import ascii_lowercase
+        var = 'yz'+ascii_lowercase.rstrip('xyz')
+        expr = ''
+        max_s = ' max ' * (mod - 1)
+        for x in range(mod):
+            expr += f' {var[x]} {var[x+1]} - abs '
+        return core.std.Expr([clip] + minblur, f'{expr + max_s} {thr} <= y x ?')
 
 
 def mdering(clip: vs.VideoNode, thr: float = 2) -> vs.VideoNode:
