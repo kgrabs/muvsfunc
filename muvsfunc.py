@@ -3953,7 +3953,7 @@ def TMinBlur(clip: vs.VideoNode, r: int = 1, thr: float = 2, mod: int = 1, plane
     blur = []
     if 0 in r: 
         diffa = clip.std.MakeDiff(gauss, planes=planes)
-        diffb = diffa.std.Convolution(coordinates=[1,2,1,2,4,2,1,2,1], planes=planes)
+        diffb = diffa.std.Convolution([1,2,1,2,4,2,1,2,1], planes=planes)
 
         neutral = f' {1 << (f.bits_per_sample - 1)} - ' if f.sample_type == vs.INTEGER else ''
         sbr = f'x 0 y {neutral} y z - min max y {neutral} y z - max min -'
